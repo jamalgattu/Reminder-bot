@@ -5,13 +5,17 @@ from telegram.error import TelegramError
 import logging
 from datetime import datetime
 import pytz
+import os
+from dotenv import load_dotenv
 import db
+
+load_dotenv()
 
 # Initialize Flask app
 app = Flask(__name__)
 
 # Initialize bot
-BOT_TOKEN = "YOUR_BOT_TOKEN"  # Replace with your actual bot token
+BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 bot = Bot(token=BOT_TOKEN)
 updater = Updater(token=BOT_TOKEN, use_context=True)
 dispatcher = updater.dispatcher
