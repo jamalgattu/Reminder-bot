@@ -155,12 +155,20 @@ def send_reminder(context: CallbackContext):
     """Send reminder notification"""
     chat_id = context.job.context['chat_id']
     message = context.job.context['message']
+    inline_message_id = context.job.context.get('inline_message_id')
 
     try:
-        bot.send_message(
-            chat_id=chat_id,
-            text=f"⏰ Reminder: {message}"
-        )
+        if inline_message_id:
+            # Edit the original inline message in the group/chat where it was sent
+            bot.edit_message_text(
+                inline_message_id=inline_message_id,
+                text=f"⏰ Reminder: {message}"
+            )
+        else:
+            bot.send_message(
+                chat_id=chat_id,
+                text=f"⏰ Reminder: {message}"
+            )
     except TelegramError as e:
         logger.error(f"Failed to send reminder: {e}")
 
@@ -298,6 +306,7 @@ def chosen_inline_result(update: Update, context: CallbackContext):
     result = update.chosen_inline_result
     result_id = result.result_id
     user_id = result.from_user.id
+    inline_message_id = result.inline_message_id  # ID of the message posted in the chat
     user_timezone = db.get_user_timezone(user_id) or 'UTC'
 
     # result_id is "time_str|message" for valid reminders
@@ -323,7 +332,17 @@ def chosen_inline_result(update: Update, context: CallbackContext):
 
     if remind_dt and message:
         db.save_user(user_id, user_timezone)
-        schedule_reminder(user_id, message, remind_dt, user_timezone)
+        delay = (remind_dt.astimezone(pytz.utc) - datetime.now(pytz.utc)).total_seconds()
+        job = job_queue.run_once(
+            send_reminder,
+            delay,
+            context={
+                'chat_id': user_id,
+                'message': message,
+                'inline_message_id': inline_message_id
+            }
+        )
+        db.save_reminder(user_id, message, remind_dt.isoformat(), job.id)
         logger.info(f"Inline reminder scheduled for user {user_id}: {message} at {remind_dt}")
 
 
