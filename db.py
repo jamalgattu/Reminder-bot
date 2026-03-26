@@ -12,7 +12,7 @@ def init_db():
     c.execute('''
         CREATE TABLE IF NOT EXISTS users (
             chat_id INTEGER PRIMARY KEY,
-            timezone TEXT DEFAULT 'Asia/Kolkata'
+            timezone TEXT DEFAULT NULL
         )
     ''')
 
@@ -48,7 +48,7 @@ def get_user_timezone(chat_id):
     c.execute('SELECT timezone FROM users WHERE chat_id = ?', (chat_id,))
     row = c.fetchone()
     conn.close()
-    return row[0] if row else 'Asia/Kolkata'
+    return row[0] if row else None
 
 def save_reminder(chat_id, message, remind_at, job_id):
     conn = sqlite3.connect(DB_PATH)
