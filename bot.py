@@ -171,14 +171,12 @@ async def remind(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             "⚠️ Please set your timezone first using /start or /settimezone"
         )
-        return
+        return 
 
     if not context.args:
         await update.message.reply_text(
-            "Usage:\n"
-            "`/remind in 30 minutes call mom`\n"
-            "`/remind tomorrow 9am standup`\n"
-            "`/remind 2h take medicine`",
+            "Just type: `/remind <time> <your message>`\n"
+            "Example: `/remind in 1 hour call dad`",
             parse_mode="Markdown"
         )
         return
