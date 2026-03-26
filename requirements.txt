@@ -6,3 +6,12 @@ pytz
 python-dotenv
 flask
 urllib3<2
+APScheduler==3.6.3
+dateparser
+flask
+python-dotenv
+python-telegram-bot==13.7
+pytz
+SQLAlchemy==2.0.0
+telegram
+urllib3<2
