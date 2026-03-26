@@ -23,8 +23,8 @@ from db import (
     init_db,
     save_user,
     get_user_timezone,
-    save_reminders,
-    get_reminders,
+    save_reminder,
+    get_reminder,
     delete_reminder,
 )
 from parser import (
