@@ -37,32 +37,28 @@ TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 
 logging.basicConfig(level=logging.INFO)
 
-# APScheduler with SQLAlchemy job store for persistence
 jobstores = {
     'default': SQLAlchemyJobStore(url='sqlite:///jobs.db')
 }
 scheduler = AsyncIOScheduler(jobstores=jobstores)
 
-# Conversation states
 ASKING_COUNTRY = 1
 ASKING_REGION = 2
 
-# Temporary store for multi-timezone follow-up
 pending_regions = {}
 
 
-# ─── Reminder sender ────────────────────────────────────────────────────────
+# ─── Reminder sender ─────────────────────────────────────────────────────────
 
 async def send_reminder(bot, chat_id: int, message: str, reminder_id: int):
     await bot.send_message(
         chat_id=chat_id,
         text=f"⏰ Reminder: {message}"
     )
-    # Clean up from DB after firing
     delete_reminder(reminder_id, chat_id)
 
 
-# ─── /start ─────────────────────────────────────────────────────────────────
+# ─── /start ──────────────────────────────────────────────────────────────────
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
@@ -78,11 +74,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return ConversationHandler.END
 
-     await update.message.reply_text(
-    "Just type: `/remind <time> <your message>`\n"
-    "Example: `/remind in 1 hour call dad`",
-    parse_mode="Markdown"
-        )
+    await update.message.reply_text(
+        "👋 Welcome to Reminder Bot!\n\n"
+        "First, which country do you live in?\n"
+        "_(e.g. India, USA, Nepal, UK)_",
+        parse_mode="Markdown"
+    )
     return ASKING_COUNTRY
 
 
@@ -126,14 +123,16 @@ async def receive_country(update: Update, context: ContextTypes.DEFAULT_TYPE):
     save_user(chat_id, tz)
     await update.message.reply_text(
         f"✅ Timezone set to *{tz}*!\n\n"
-        f"You can now use /remind to set reminders.\n"
-        f"Example: `/remind in 30 minutes call mom`",
+        f"You can now set reminders like this:\n"
+        f"`/remind 30m Call mom`\n"
+        f"`/remind 2h Meeting`\n"
+        f"`/remind 45s Take rice off`",
         parse_mode="Markdown"
     )
     return ConversationHandler.END
 
 
-# ─── Conversation: region input (multi-timezone countries) ───────────────────
+# ─── Conversation: region input ──────────────────────────────────────────────
 
 async def receive_region(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
@@ -154,8 +153,10 @@ async def receive_region(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(
         f"✅ Timezone set to *{tz}*!\n\n"
-        f"You can now use /remind to set reminders.\n"
-        f"Example: `/remind in 30 minutes call mom`",
+        f"You can now set reminders like this:\n"
+        f"`/remind 30m Call mom`\n"
+        f"`/remind 2h Meeting`\n"
+        f"`/remind 45s Take rice off`",
         parse_mode="Markdown"
     )
     return ConversationHandler.END
@@ -171,12 +172,16 @@ async def remind(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             "⚠️ Please set your timezone first using /start or /settimezone"
         )
-        return 
+        return
 
     if not context.args:
         await update.message.reply_text(
-            "Just type: `/remind <time> <your message>`\n"
-            "Example: `/remind in 1 hour call dad`",
+            "Usage: `/remind <time> <message>`\n\n"
+            "Examples:\n"
+            "`/remind 30m Call mom`\n"
+            "`/remind 2h Meeting`\n"
+            "`/remind 45s Take rice off`\n"
+            "`/remind 1h30m Doctor appointment`",
             parse_mode="Markdown"
         )
         return
@@ -186,7 +191,8 @@ async def remind(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not time_part or not message_part:
         await update.message.reply_text(
-            "❌ Couldn't understand that.\nTry: `/remind in 30 minutes call mom`",
+            "❌ Wrong format. Use: `/remind <time> <message>`\n"
+            "Example: `/remind 30m Call mom`",
             parse_mode="Markdown"
         )
         return
@@ -195,28 +201,18 @@ async def remind(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not remind_at:
         await update.message.reply_text(
-            "❌ Couldn't parse the time. Try something like:\n"
-            "`in 30 minutes`, `tomorrow 9am`, `2h30m`",
+            "❌ Couldn't parse time. Use formats like:\n"
+            "`30s` `10m` `2h` `1h30m`",
             parse_mode="Markdown"
         )
         return
 
-    now = datetime.now(pytz.timezone(tz_str))
-    if remind_at <= now:
-        await update.message.reply_text(
-            "❌ That time is in the past! Please give a future time."
-        )
-        return
-
-    # Save to DB first to get reminder_id
     job_id = str(uuid.uuid4())
     save_reminder(chat_id, message_part, remind_at.isoformat(), job_id)
 
-    # Get the reminder_id just inserted
     reminders = get_reminders(chat_id)
     reminder_id = reminders[-1][0]
 
-    # Schedule the job
     scheduler.add_job(
         send_reminder,
         trigger='date',
@@ -226,7 +222,7 @@ async def remind(update: Update, context: ContextTypes.DEFAULT_TYPE):
         replace_existing=True,
     )
 
-    formatted_time = remind_at.strftime("%d %b %Y, %I:%M %p")
+    formatted_time = remind_at.strftime("%d %b %Y, %I:%M:%S %p")
     await update.message.reply_text(
         f"✅ Reminder set!\n"
         f"📌 *{message_part}*\n"
@@ -265,7 +261,10 @@ async def cancel_reminder(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
 
     if not context.args:
-        await update.message.reply_text("Usage: `/cancel <id>`\nGet IDs from /reminders", parse_mode="Markdown")
+        await update.message.reply_text(
+            "Usage: `/cancel <id>`\nGet IDs from /reminders",
+            parse_mode="Markdown"
+        )
         return
 
     try:
@@ -283,7 +282,7 @@ async def cancel_reminder(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         scheduler.remove_job(job_id)
     except Exception:
-        pass  # Job may have already fired
+        pass
 
     await update.message.reply_text(f"✅ Reminder *#{reminder_id}* cancelled.", parse_mode="Markdown")
 
@@ -299,7 +298,7 @@ async def my_timezone(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⚠️ No timezone set. Use /start or /settimezone.")
 
 
-# ─── Main ─────────────────────────────────────────────────────────────────────
+# ─── Main ────────────────────────────────────────────────────────────────────
 
 def main():
     init_db()
@@ -307,7 +306,6 @@ def main():
 
     app = ApplicationBuilder().token(TOKEN).build()
 
-    # Conversation handler for timezone setup
     conv_handler = ConversationHandler(
         entry_points=[
             CommandHandler("start", start),
