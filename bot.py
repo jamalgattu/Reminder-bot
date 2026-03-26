@@ -216,12 +216,12 @@ async def remind(update: Update, context: ContextTypes.DEFAULT_TYPE):
     reminder_id = reminders[-1][0]
 
     scheduler.add_job(
-        send_reminder,
-        trigger='date',
-        run_date=remind_at,
-        args=[context.bot, chat_id, message_part, reminder_id],
-        id=job_id,
-        replace_existing=True,
+    send_reminder,
+    trigger='date',
+    run_date=remind_at,
+    args=[chat_id, message_part, reminder_id],  # removed context.bot
+    id=job_id,
+    replace_existing=True,
     )
 
     formatted_time = remind_at.strftime("%d %b %Y, %I:%M:%S %p")
