@@ -1,10 +1,10 @@
 # parser.py
-import dateparser
+import re
+from datetime import datetime, timedelta
 import pytz
-from datetime import datetime
+
 
 # Country -> timezone mapping
-# For multi-timezone countries, maps to most common zone
 COUNTRY_TIMEZONE_MAP = {
     # Asia
     "india": "Asia/Kolkata",
@@ -68,7 +68,7 @@ COUNTRY_TIMEZONE_MAP = {
     "new zealand": "Pacific/Auckland",
 }
 
-# Multi-timezone countries needing follow-up
+# Multi-timezone countries
 MULTI_TIMEZONE_COUNTRIES = {
     "usa": {
         "eastern": "America/New_York",
@@ -115,7 +115,6 @@ MULTI_TIMEZONE_COUNTRIES = {
 def get_timezone_for_country(country: str):
     """
     Returns (timezone_str, needs_followup, followup_options)
-    needs_followup is True for multi-timezone countries
     """
     country = country.strip().lower()
 
@@ -127,7 +126,7 @@ def get_timezone_for_country(country: str):
     if tz:
         return tz, False, None
 
-    # Try pytz directly in case user typed a valid tz string like "Asia/Kolkata"
+    # Try direct pytz timezone string
     try:
         pytz.timezone(country)
         return country, False, None
@@ -135,52 +134,47 @@ def get_timezone_for_country(country: str):
         return None, False, None
 
 
-def parse_reminder_time(text: str, timezone_str: str):
+def parse_time_string(time_str: str):
     """
-    Parses natural language or command-style time from text.
-    Returns a timezone-aware datetime or None.
-    Examples:
-        "30m Call mom"        -> parses "30m" as 30 minutes from now
-        "tomorrow 9am standup"
-        "2h30m meeting"
+    Parses time strings like 30s, 30m, 2h, 2h30m into total seconds.
+    Returns total seconds or None if invalid.
     """
-    tz = pytz.timezone(timezone_str)
-    now = datetime.now(tz)
-
-    settings = {
-        'PREFER_DATES_FROM': 'future',
-        'RETURN_AS_TIMEZONE_AWARE': True,
-        'TIMEZONE': timezone_str,
-        'RELATIVE_BASE': now,
-    }
-
-    parsed = dateparser.parse(text, settings=settings)
-    return parsed
+    time_str = time_str.strip().lower()
+    pattern = re.compile(r'^(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s)?$')
+    match = pattern.fullmatch(time_str)
+    if not match or not any(match.groups()):
+        return None
+    hours = int(match.group(1) or 0)
+    minutes = int(match.group(2) or 0)
+    seconds = int(match.group(3) or 0)
+    total = hours * 3600 + minutes * 60 + seconds
+    return total if total > 0 else None
 
 
 def split_time_and_message(text: str):
     """
-    Splits user input into (time_part, message_part).
-    Strategy: try parsing progressively longer prefixes until one works.
-    E.g. "in 30 minutes call mom" -> ("in 30 minutes", "call mom")
-         "tomorrow 9am doctor"    -> ("tomorrow 9am", "doctor")
-         "30m take medicine"      -> ("30m", "take medicine")
+    Expects format: <time> <message>
+    e.g. "30m Call mom", "2h30m Meeting", "45s Take rice off"
+    Returns (time_str, message) or (None, None)
     """
-    words = text.split()
+    parts = text.strip().split(maxsplit=1)
+    if len(parts) < 2:
+        return None, None
+    time_str = parts[0]
+    message = parts[1]
+    seconds = parse_time_string(time_str)
+    if not seconds:
+        return None, None
+    return time_str, message
 
-    for i in range(1, len(words)):
-        time_candidate = " ".join(words[:i])
-        message_candidate = " ".join(words[i:])
 
-        if not message_candidate.strip():
-            continue
-
-        parsed = dateparser.parse(time_candidate, settings={
-            'PREFER_DATES_FROM': 'future',
-            'RETURN_AS_TIMEZONE_AWARE': True,
-        })
-
-        if parsed:
-            return time_candidate, message_candidate
-
-    return None, None
+def parse_reminder_time(time_str: str, timezone_str: str):
+    """
+    Converts time string to a future timezone-aware datetime.
+    """
+    seconds = parse_time_string(time_str)
+    if not seconds:
+        return None
+    tz = pytz.timezone(timezone_str)
+    now = datetime.now(tz)
+    return now + timedelta(seconds=seconds)
