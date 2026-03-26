@@ -1,8 +1,10 @@
+# bot.py
 from flask import Flask, request, jsonify
 from telegram import (
     Update, Bot,
     InlineQueryResultArticle, InputTextMessageContent,
-    InlineKeyboardMarkup, InlineKeyboardButton
+    InlineKeyboardMarkup, InlineKeyboardButton,
+    ReactionTypeEmoji
 )
 from telegram.ext import (
     Updater, CommandHandler, CallbackContext,
@@ -16,73 +18,39 @@ import os
 import uuid
 from dotenv import load_dotenv
 import db
-from parser import parse_time_string
+from parser import parse_time_to_dt, parse_time_string
 
 load_dotenv()
 
-# Initialize Flask app
 app = Flask(__name__)
 
-# Initialize bot
 BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 bot = Bot(token=BOT_TOKEN)
 updater = Updater(token=BOT_TOKEN, use_context=True)
 dispatcher = updater.dispatcher
 job_queue = updater.job_queue
 
-# Setup logging
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
-# Initialize database
 db.init_db()
 
-# In-memory store for pending inline reminders (rid -> reminder data)
-# Only lives until the user taps the button, so memory is fine
+# Stores pending inline reminders until user taps confirm button
 pending_inline = {}
 
 
 # ========== Helpers ==========
 
 def format_remind_dt(remind_dt, tz_str):
-    """Format a timezone-aware datetime nicely."""
     tz = pytz.timezone(tz_str)
     local_dt = remind_dt.astimezone(tz)
     return local_dt.strftime("%-d %b %Y, %I:%M:%S %p") + f" ({tz_str})"
 
 
-def parse_time_to_dt(time_str, user_timezone):
-    """
-    Parse a time string (duration or HH:MM) into a timezone-aware datetime.
-    Returns remind_dt or None.
-    """
-    tz = pytz.timezone(user_timezone)
-    now = datetime.now(tz)
-
-    seconds = parse_time_string(time_str)
-    if seconds:
-        return now + timedelta(seconds=seconds)
-
-    try:
-        remind_time = datetime.strptime(time_str, "%H:%M").time()
-        remind_dt = tz.localize(datetime.combine(now.date(), remind_time))
-        if remind_dt <= now:
-            remind_dt += timedelta(days=1)
-        return remind_dt
-    except ValueError:
-        pass
-
-    return None
-
-
 def parse_remind_args(args, user_timezone):
-    """
-    Parse /remind command args. Supports duration (30s/5m/2h30m) and clock (14:30).
-    Returns (remind_dt, message, error_str).
-    """
     if len(args) < 2:
         return None, None, (
             "Usage: /remind <time> <message>\nExamples:\n"
@@ -101,23 +69,61 @@ def parse_remind_args(args, user_timezone):
     return remind_dt, message, None
 
 
-def schedule_reminder(chat_id, message, remind_dt, extra=None):
-    """Schedule a reminder job and save it to the DB."""
+def schedule_reminder(chat_id, user_id, message_id, message, remind_dt, extra=None):
     now = datetime.now(pytz.utc)
     delay = (remind_dt.astimezone(pytz.utc) - now).total_seconds()
-    ctx = {'chat_id': chat_id, 'message': message}
+    ctx = {
+        'chat_id': chat_id,
+        'user_id': user_id,
+        'message_id': message_id,
+        'message': message,
+    }
     if extra:
         ctx.update(extra)
     job = job_queue.run_once(send_reminder, delay, context=ctx)
-    db.save_reminder(chat_id, message, remind_dt.isoformat(), job.id)
+    db.save_reminder(chat_id, user_id, message_id, message, remind_dt.isoformat(), job.id)
     return job
+
+
+# ========== Reminder Sender ==========
+
+def send_reminder(context: CallbackContext):
+    chat_id = context.job.context['chat_id']
+    user_id = context.job.context['user_id']
+    message_id = context.job.context.get('message_id')
+    message = context.job.context['message']
+    user_first_name = context.job.context.get('user_first_name', 'You')
+
+    try:
+        # Add ⏰ reaction to original message if message_id exists
+        if message_id:
+            try:
+                bot.set_message_reaction(
+                    chat_id=chat_id,
+                    message_id=message_id,
+                    reaction=[ReactionTypeEmoji(emoji="⏰")],
+                    is_big=True
+                )
+            except TelegramError as e:
+                logger.warning(f"Could not set reaction: {e}")
+
+        # Send tagged reminder message in chat
+        mention = f'<a href="tg://user?id={user_id}">{user_first_name}</a>'
+        bot.send_message(
+            chat_id=chat_id,
+            text=f"{mention} ⏰ Reminder: {message}",
+            parse_mode='HTML'
+        )
+
+    except TelegramError as e:
+        logger.error(f"Failed to send reminder: {e}")
 
 
 # ========== Command Handlers ==========
 
 def start(update: Update, context: CallbackContext):
-    chat_id = update.effective_chat.id
-    db.save_user(chat_id, timezone=None)
+    user_id = update.effective_user.id
+    db.save_user(user_id, timezone=None)
     update.message.reply_text(
         "👋 Welcome to Reminder Bot!\n\n"
         "Commands:\n"
@@ -126,35 +132,35 @@ def start(update: Update, context: CallbackContext):
         "/remind <time> <message> — Set a reminder\n"
         "  Duration: /remind 30m Drink water\n"
         "  Clock:    /remind 14:30 Team meeting\n\n"
-        "/list — Show all reminders\n"
+        "/list — Show reminders in this chat\n"
         "/delete <id> — Delete a reminder\n\n"
-        "💬 In a group chat?\n"
-        "Use /remind directly in the group — when the time comes, "
-        "I'll send a new message in the group tagging you.\n\n"
-        "⚡ Inline mode (@botname in any chat) is also supported, "
-        "but reminders set that way are delivered to you privately."
+        "💬 Works in groups too!\n"
+        "Use /remind in a group and I'll tag you when the time comes."
     )
 
 
 def set_timezone(update: Update, context: CallbackContext):
-    chat_id = update.effective_chat.id
+    user_id = update.effective_user.id
     if not context.args:
         update.message.reply_text(
-            "Usage: /set_timezone <timezone>\nExample: /set_timezone Asia/Kolkata"
+            "Usage: /set_timezone <timezone>\n"
+            "Example: /set_timezone Asia/Kolkata\n\n"
+            "Find your timezone at: https://en.wikipedia.org/wiki/List_of_tz_database_time_zones"
         )
         return
     timezone = context.args[0]
     try:
         pytz.timezone(timezone)
-        db.save_user(chat_id, timezone)
+        db.save_user(user_id, timezone)
         update.message.reply_text(f"✅ Timezone set to {timezone}")
     except pytz.exceptions.UnknownTimeZoneError:
         update.message.reply_text(f"❌ Unknown timezone: {timezone}")
 
 
 def remind(update: Update, context: CallbackContext):
-    chat_id = update.effective_chat.id
     user = update.effective_user
+    chat_id = update.effective_chat.id
+    message_id = update.message.message_id
     user_timezone = db.get_user_timezone(user.id) or 'UTC'
 
     remind_dt, message, error = parse_remind_args(context.args, user_timezone)
@@ -162,16 +168,9 @@ def remind(update: Update, context: CallbackContext):
         update.message.reply_text(error)
         return
 
-    is_group = update.effective_chat.type in ('group', 'supergroup')
-    extra = None
-    if is_group:
-        extra = {
-            'user_id': user.id,
-            'user_first_name': user.first_name or 'You',
-            'inline_chat_id': chat_id,
-        }
+    extra = {'user_first_name': user.first_name or 'You'}
+    schedule_reminder(chat_id, user.id, message_id, message, remind_dt, extra=extra)
 
-    schedule_reminder(chat_id, message, remind_dt, extra=extra)
     time_label = format_remind_dt(remind_dt, user_timezone)
     update.message.reply_text(
         f"✅ Reminder set!\n"
@@ -180,43 +179,13 @@ def remind(update: Update, context: CallbackContext):
     )
 
 
-def send_reminder(context: CallbackContext):
-    """Fire a reminder — sends a new message tagging the user in the chat, or DMs the user."""
-    chat_id = context.job.context['chat_id']
-    message = context.job.context['message']
-    inline_chat_id = context.job.context.get('inline_chat_id')
-    user_id = context.job.context.get('user_id')
-    user_first_name = context.job.context.get('user_first_name', 'You')
-
-    reminder_text = f"⏰ Reminder: {message}"
-
-    try:
-        if inline_chat_id and user_id:
-            # Send a new message in the group, tagging the user
-            mention = f'<a href="tg://user?id={user_id}">{user_first_name}</a>'
-            bot.send_message(
-                chat_id=inline_chat_id,
-                text=f"{mention} {reminder_text}",
-                parse_mode='HTML'
-            )
-        else:
-            bot.send_message(chat_id=chat_id, text=reminder_text)
-    except TelegramError as e:
-        logger.error(f"Failed to send reminder: {e}")
-        try:
-            if inline_chat_id:
-                bot.send_message(chat_id=chat_id, text=reminder_text)
-        except TelegramError:
-            pass
-
-
 def list_reminders(update: Update, context: CallbackContext):
     chat_id = update.effective_chat.id
     reminders = db.get_reminders(chat_id)
     if not reminders:
-        update.message.reply_text("📭 You have no active reminders.")
+        update.message.reply_text("📭 No reminders in this chat.")
         return
-    lines = ["📋 Your Reminders:\n"]
+    lines = ["📋 Reminders in this chat:\n"]
     for reminder_id, reminder_msg, remind_at in reminders:
         lines.append(f"🔹 ID {reminder_id}: {reminder_msg}\n   🕐 {remind_at}\n")
     update.message.reply_text('\n'.join(lines))
@@ -241,14 +210,12 @@ def delete_reminder(update: Update, context: CallbackContext):
         update.message.reply_text("❌ Invalid reminder ID.")
 
 
-# ========== Inline Bot Handlers ==========
+# ========== Inline Mode ==========
 
 def inline_query(update: Update, context: CallbackContext):
-    """Handle inline queries: @botname 30m Have tea"""
     query = update.inline_query.query.strip()
     user_id = update.inline_query.from_user.id
     user_timezone = db.get_user_timezone(user_id) or 'UTC'
-
     results = []
 
     if not query:
@@ -267,18 +234,16 @@ def inline_query(update: Update, context: CallbackContext):
         parts = query.split(maxsplit=1)
         time_str = parts[0]
         message = parts[1] if len(parts) > 1 else ""
-
         remind_dt = parse_time_to_dt(time_str, user_timezone) if message else None
 
         if remind_dt and message:
             time_label = format_remind_dt(remind_dt, user_timezone)
-
-            # Store pending reminder data keyed by a short ID
             rid = str(uuid.uuid4())[:12]
             pending_inline[rid] = {
                 'time_str': time_str,
                 'message': message,
                 'user_id': user_id,
+                'user_first_name': update.inline_query.from_user.first_name or 'You',
                 'user_timezone': user_timezone,
                 'remind_dt': remind_dt.isoformat(),
             }
@@ -292,25 +257,13 @@ def inline_query(update: Update, context: CallbackContext):
             keyboard = InlineKeyboardMarkup([[
                 InlineKeyboardButton("✅ Set Reminder", callback_data=f"r:{rid}")
             ]])
-
             results.append(
                 InlineQueryResultArticle(
                     id=rid,
                     title=f"⏰ Remind: {message}",
-                    description=f"🕐 {time_label}  — tap to confirm",
+                    description=f"🕐 {time_label} — tap to confirm",
                     input_message_content=InputTextMessageContent(preview_text),
                     reply_markup=keyboard
-                )
-            )
-        elif time_str and not message:
-            results.append(
-                InlineQueryResultArticle(
-                    id=str(uuid.uuid4()),
-                    title="Add a message",
-                    description=f"Time: {time_str} — now type your reminder message",
-                    input_message_content=InputTextMessageContent(
-                        f"⏳ Time: {time_str}\n📝 Add your reminder message after the time."
-                    )
                 )
             )
         else:
@@ -329,12 +282,6 @@ def inline_query(update: Update, context: CallbackContext):
 
 
 def inline_confirm(update: Update, context: CallbackContext):
-    """
-    Called when the user taps the 'Set Reminder' button on an inline message.
-    For inline messages, query.message is None — we use inline_message_id to edit.
-    The reminder is delivered as a DM to the user since Telegram does not expose
-    the group chat_id in inline callbacks.
-    """
     query = update.callback_query
     data = query.data
 
@@ -352,21 +299,27 @@ def inline_confirm(update: Update, context: CallbackContext):
     user_id = pending['user_id']
     message = pending['message']
     user_timezone = pending['user_timezone']
+    user_first_name = pending['user_first_name']
     remind_dt = datetime.fromisoformat(pending['remind_dt'])
-    user_first_name = query.from_user.first_name or "You"
+
+    # Get group chat_id and message_id from the callback
+    if query.message:
+        chat_id = query.message.chat_id
+        message_id = query.message.message_id
+    else:
+        # Inline message in group — use inline_message_id context
+        chat_id = user_id  # fallback to DM if no chat context
+        message_id = None
 
     db.save_user(user_id, user_timezone)
 
-    # Telegram does not provide the group chat_id for inline callbacks.
-    # We schedule the reminder as a DM to the user (chat_id = user_id).
     schedule_reminder(
+        chat_id,
         user_id,
+        message_id,
         message,
         remind_dt,
-        extra={
-            'user_id': user_id,
-            'user_first_name': user_first_name,
-        }
+        extra={'user_first_name': user_first_name}
     )
 
     time_label = format_remind_dt(remind_dt, user_timezone)
@@ -376,7 +329,6 @@ def inline_confirm(update: Update, context: CallbackContext):
         f"🕐 {time_label}"
     )
 
-    # For inline messages, query.message is None — edit via inline_message_id
     if query.message:
         query.edit_message_text(confirm_text)
     else:
@@ -401,6 +353,7 @@ dispatcher.add_handler(CommandHandler("delete", delete_reminder))
 dispatcher.add_handler(InlineQueryHandler(inline_query))
 dispatcher.add_handler(CallbackQueryHandler(inline_confirm, pattern=r"^r:"))
 
+
 # ========== Flask Routes ==========
 
 @app.route('/webhook', methods=['POST'])
@@ -415,13 +368,12 @@ def index():
 
 @app.route('/health', methods=['GET'])
 def health():
-    from flask import jsonify
     return jsonify({"status": "healthy"}), 200
+
 
 # ========== Error Handler ==========
 
 def error_handler(update, context):
-    """Suppress Conflict errors (stale poll from previous run); log everything else."""
     from telegram.error import Conflict, NetworkError
     err = context.error
     if isinstance(err, Conflict):
@@ -437,7 +389,6 @@ dispatcher.add_error_handler(error_handler)
 # ========== Main ==========
 
 if __name__ == '__main__':
-    # Clear any stale webhook or long-poll connections from previous runs
     bot.delete_webhook(drop_pending_updates=True)
     updater.start_polling(drop_pending_updates=True, timeout=20, read_latency=5)
-    app.run(host='0.0.0.0', port=5000, debug=False)
+    app.run(host='0.0.0.0', port=5000, debug=False
