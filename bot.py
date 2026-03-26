@@ -150,14 +150,24 @@ def set_timezone(update: Update, context: CallbackContext):
 
 def remind(update: Update, context: CallbackContext):
     chat_id = update.effective_chat.id
-    user_timezone = db.get_user_timezone(chat_id) or 'UTC'
+    user = update.effective_user
+    user_timezone = db.get_user_timezone(user.id) or 'UTC'
 
     remind_dt, message, error = parse_remind_args(context.args, user_timezone)
     if error:
         update.message.reply_text(error)
         return
 
-    schedule_reminder(chat_id, message, remind_dt)
+    is_group = update.effective_chat.type in ('group', 'supergroup')
+    extra = None
+    if is_group:
+        extra = {
+            'user_id': user.id,
+            'user_first_name': user.first_name or 'You',
+            'inline_chat_id': chat_id,
+        }
+
+    schedule_reminder(chat_id, message, remind_dt, extra=extra)
     time_label = format_remind_dt(remind_dt, user_timezone)
     update.message.reply_text(
         f"✅ Reminder set!\n"
@@ -317,7 +327,9 @@ def inline_query(update: Update, context: CallbackContext):
 def inline_confirm(update: Update, context: CallbackContext):
     """
     Called when the user taps the 'Set Reminder' button on an inline message.
-    At this point we have the real chat_id and message_id.
+    For inline messages, query.message is None — we use inline_message_id to edit.
+    The reminder is delivered as a DM to the user since Telegram does not expose
+    the group chat_id in inline callbacks.
     """
     query = update.callback_query
     data = query.data
@@ -337,34 +349,43 @@ def inline_confirm(update: Update, context: CallbackContext):
     message = pending['message']
     user_timezone = pending['user_timezone']
     remind_dt = datetime.fromisoformat(pending['remind_dt'])
-
-    # Re-parse in case of clock-time that needs recalculation (edge case)
-    # Use stored remind_dt directly — it was calculated at inline_query time
-    chat_id = query.message.chat_id
-    message_id = query.message.message_id
-
     user_first_name = query.from_user.first_name or "You"
 
     db.save_user(user_id, user_timezone)
+
+    # Telegram does not provide the group chat_id for inline callbacks.
+    # We schedule the reminder as a DM to the user (chat_id = user_id).
     schedule_reminder(
         user_id,
         message,
         remind_dt,
         extra={
-            'inline_chat_id': chat_id,
-            'inline_message_id': message_id,
             'user_id': user_id,
             'user_first_name': user_first_name,
         }
     )
 
     time_label = format_remind_dt(remind_dt, user_timezone)
-    query.edit_message_text(
+    confirm_text = (
         f"✅ Reminder set!\n"
         f"📌 {message}\n"
-        f"🕐 {time_label}"
+        f"🕐 {time_label}\n\n"
+        f"I'll send you a DM when it's time."
     )
-    query.answer("Reminder set!")
+
+    # For inline messages, query.message is None — edit via inline_message_id
+    if query.message:
+        query.edit_message_text(confirm_text)
+    else:
+        try:
+            context.bot.edit_message_text(
+                inline_message_id=query.inline_message_id,
+                text=confirm_text,
+            )
+        except Exception:
+            pass
+
+    query.answer("Reminder set! I'll DM you when it's time.")
 
 
 # ========== Register Handlers ==========
