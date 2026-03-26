@@ -50,7 +50,9 @@ pending_regions = {}
 
 # ─── Reminder sender ─────────────────────────────────────────────────────────
 
-async def send_reminder(bot, chat_id: int, message: str, reminder_id: int):
+async def send_reminder(chat_id: int, message: str, reminder_id: int):
+    from telegram import Bot
+    bot = Bot(token=TOKEN)
     await bot.send_message(
         chat_id=chat_id,
         text=f"⏰ Reminder: {message}"
