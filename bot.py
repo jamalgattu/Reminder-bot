@@ -394,8 +394,26 @@ def health():
     from flask import jsonify
     return jsonify({"status": "healthy"}), 200
 
+# ========== Error Handler ==========
+
+def error_handler(update, context):
+    """Suppress Conflict errors (stale poll from previous run); log everything else."""
+    from telegram.error import Conflict, NetworkError
+    err = context.error
+    if isinstance(err, Conflict):
+        logger.warning("Conflict: another instance was running — now resolved.")
+    elif isinstance(err, NetworkError):
+        logger.warning(f"Network error (will retry): {err}")
+    else:
+        logger.error(f"Update {update} caused error: {err}", exc_info=err)
+
+dispatcher.add_error_handler(error_handler)
+
+
 # ========== Main ==========
 
 if __name__ == '__main__':
-    updater.start_polling()
+    # Clear any stale webhook or long-poll connections from previous runs
+    bot.delete_webhook(drop_pending_updates=True)
+    updater.start_polling(drop_pending_updates=True, timeout=20, read_latency=5)
     app.run(host='0.0.0.0', port=5000, debug=False)
