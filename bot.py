@@ -4,7 +4,7 @@ import uuid
 from datetime import datetime
 
 import pytz
-from telegram import Update
+from telegram import Update, InlineQueryResultArticle, InputTextMessageContent
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
@@ -12,6 +12,7 @@ from telegram.ext import (
     ContextTypes,
     ConversationHandler,
     filters,
+    InlineQueryHandler,
 )
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.jobstores.sqlalchemy import SQLAlchemyJobStore
@@ -22,7 +23,7 @@ from db import (
     init_db,
     save_user,
     get_user_timezone,
-    save_reminder,
+    save_reminders,
     get_reminders,
     delete_reminder,
 )
@@ -48,7 +49,7 @@ ASKING_REGION = 2
 pending_regions = {}
 
 
-# ─── Reminder sender ─────────────────────────────────────────────────────────
+# ─── Reminder sender ────────────────────────────────────────────────────────
 
 async def send_reminder(chat_id: int, message: str, reminder_id: int):
     from telegram import Bot
@@ -60,7 +61,7 @@ async def send_reminder(chat_id: int, message: str, reminder_id: int):
     delete_reminder(reminder_id, chat_id)
 
 
-# ─── /start ──────────────────────────────────────────────────────────────────
+# ─── /start ───────────────────────────────────────────────────────────
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
@@ -85,7 +86,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ASKING_COUNTRY
 
 
-# ─── /settimezone ────────────────────────────────────────────────────────────
+# ─── /settimezone ─────────────────────────────────────────────────────────
 
 async def set_timezone(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
@@ -164,7 +165,7 @@ async def receive_region(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 
-# ─── /remind ─────────────────────────────────────────────────────────────────
+# ─── /remind ──────────────────────────────────────────────────────────────
 
 async def remind(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
@@ -216,12 +217,12 @@ async def remind(update: Update, context: ContextTypes.DEFAULT_TYPE):
     reminder_id = reminders[-1][0]
 
     scheduler.add_job(
-    send_reminder,
-    trigger='date',
-    run_date=remind_at,
-    args=[chat_id, message_part, reminder_id],  # removed context.bot
-    id=job_id,
-    replace_existing=True,
+        send_reminder,
+        trigger='date',
+        run_date=remind_at,
+        args=[chat_id, message_part, reminder_id],
+        id=job_id,
+        replace_existing=True,
     )
 
     formatted_time = remind_at.strftime("%d %b %Y, %I:%M:%S %p")
@@ -233,7 +234,7 @@ async def remind(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-# ─── /reminders ──────────────────────────────────────────────────────────────
+# ─── /reminders ──────────────────────────────────────────────────────────
 
 async def list_reminders(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
@@ -257,7 +258,7 @@ async def list_reminders(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-# ─── /cancel ─────────────────────────────────────────────────────────────────
+# ─── /cancel ──────────────────────────────────────────────────────────────
 
 async def cancel_reminder(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
@@ -289,7 +290,7 @@ async def cancel_reminder(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"✅ Reminder *#{reminder_id}* cancelled.", parse_mode="Markdown")
 
 
-# ─── /mytimezone ─────────────────────────────────────────────────────────────
+# ─── /mytimezone ──────────────────────────────────────────────────────────
 
 async def my_timezone(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
@@ -300,7 +301,117 @@ async def my_timezone(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⚠️ No timezone set. Use /start or /settimezone.")
 
 
-# ─── Main ────────────────────────────────────────────────────────────────────
+# ─── Inline Query Handler ──────────────────────────────────────────────────
+
+async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle inline queries for setting reminders"""
+    query = update.inline_query.query.strip()
+    user_id = update.effective_user.id
+    tz_str = get_user_timezone(user_id)
+
+    # If no timezone is set, show help
+    if not tz_str:
+        results = [
+            InlineQueryResultArticle(
+                id="no_timezone",
+                title="⚠️ Set your timezone first",
+                description="Use /start or /settimezone in DM to set timezone",
+                input_message_content=InputTextMessageContent(
+                    message_text="Please set your timezone first! Use /start or /settimezone in our DM."
+                ),
+            )
+        ]
+        await update.inline_query.answer(results)
+        return
+
+    # If query is empty, show usage
+    if not query:
+        results = [
+            InlineQueryResultArticle(
+                id="usage",
+                title="Create a reminder",
+                description="Format: <time> <message>  (e.g. 30m Call mom)",
+                input_message_content=InputTextMessageContent(
+                    message_text="📖 Usage: Type a reminder like '30m Call mom' or '2h Meeting'"
+                ),
+            )
+        ]
+        await update.inline_query.answer(results)
+        return
+
+    # Parse the input
+    time_part, message_part = split_time_and_message(query)
+
+    if not time_part or not message_part:
+        results = [
+            InlineQueryResultArticle(
+                id="invalid_format",
+                title="❌ Invalid format",
+                description="Use: <time> <message>  (e.g. 30m Call mom)",
+                input_message_content=InputTextMessageContent(
+                    message_text=f"❌ Invalid format. Use: `<time> <message>`\nExample: `30m Call mom`"
+                ),
+            )
+        ]
+        await update.inline_query.answer(results)
+        return
+
+    # Parse time
+    remind_at = parse_reminder_time(time_part, tz_str)
+
+    if not remind_at:
+        results = [
+            InlineQueryResultArticle(
+                id="invalid_time",
+                title="❌ Invalid time format",
+                description="Use formats like: 30s, 10m, 2h, 1h30m",
+                input_message_content=InputTextMessageContent(
+                    message_text="❌ Couldn't parse time. Use formats like: `30s` `10m` `2h` `1h30m`"
+                ),
+            )
+        ]
+        await update.inline_query.answer(results)
+        return
+
+    # Create reminder
+    job_id = str(uuid.uuid4())
+    save_reminder(user_id, message_part, remind_at.isoformat(), job_id)
+
+    reminders = get_reminders(user_id)
+    reminder_id = reminders[-1][0]
+
+    scheduler.add_job(
+        send_reminder,
+        trigger='date',
+        run_date=remind_at,
+        args=[user_id, message_part, reminder_id],
+        id=job_id,
+        replace_existing=True,
+    )
+
+    formatted_time = remind_at.strftime("%d %b %Y, %I:%M:%S %p")
+    confirmation_text = (
+        f"✅ Reminder set!\n"
+        f"📌 *{message_part}*\n"
+        f"🕐 {formatted_time} ({tz_str})"
+    )
+
+    results = [
+        InlineQueryResultArticle(
+            id=job_id,
+            title=f"✅ Reminder: {message_part}",
+            description=f"Set for {formatted_time}",
+            input_message_content=InputTextMessageContent(
+                message_text=confirmation_text,
+                parse_mode="Markdown"
+            ),
+        )
+    ]
+
+    await update.inline_query.answer(results)
+
+
+# ─── Main ─────────────────────────────────────────────────────────────────
 
 def main():
     init_db()
@@ -325,6 +436,7 @@ def main():
     app.add_handler(CommandHandler("reminders", list_reminders))
     app.add_handler(CommandHandler("cancel", cancel_reminder))
     app.add_handler(CommandHandler("mytimezone", my_timezone))
+    app.add_handler(InlineQueryHandler(inline_query))
 
     print("🤖 Bot is running...")
     app.run_polling()
