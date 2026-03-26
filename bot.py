@@ -78,12 +78,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return ConversationHandler.END
 
-    await update.message.reply_text(
-        "👋 Welcome to Reminder Bot!\n\n"
-        "First, which country do you live in?\n"
-        "_(e.g. India, USA, Nepal, UK)_",
-        parse_mode="Markdown"
-    )
+     await update.message.reply_text(
+    "Just type: `/remind <time> <your message>`\n"
+    "Example: `/remind in 1 hour call dad`",
+    parse_mode="Markdown"
+        )
     return ASKING_COUNTRY
 
 
