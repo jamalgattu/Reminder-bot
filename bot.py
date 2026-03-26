@@ -167,27 +167,28 @@ def remind(update: Update, context: CallbackContext):
 
 
 def send_reminder(context: CallbackContext):
-    """Fire a reminder — edits the inline message in the chat, or DMs the user."""
+    """Fire a reminder — sends a new message tagging the user in the chat, or DMs the user."""
     chat_id = context.job.context['chat_id']
     message = context.job.context['message']
     inline_chat_id = context.job.context.get('inline_chat_id')
-    inline_message_id = context.job.context.get('inline_message_id')
+    user_id = context.job.context.get('user_id')
+    user_first_name = context.job.context.get('user_first_name', 'You')
 
     reminder_text = f"⏰ Reminder: {message}"
 
     try:
-        if inline_chat_id and inline_message_id:
-            # Edit the original message right in the group/chat
-            bot.edit_message_text(
+        if inline_chat_id and user_id:
+            # Send a new message in the group, tagging the user
+            mention = f'<a href="tg://user?id={user_id}">{user_first_name}</a>'
+            bot.send_message(
                 chat_id=inline_chat_id,
-                message_id=inline_message_id,
-                text=reminder_text
+                text=f"{mention} {reminder_text}",
+                parse_mode='HTML'
             )
         else:
             bot.send_message(chat_id=chat_id, text=reminder_text)
     except TelegramError as e:
         logger.error(f"Failed to send reminder: {e}")
-        # Fallback: DM the user
         try:
             if inline_chat_id:
                 bot.send_message(chat_id=chat_id, text=reminder_text)
@@ -342,12 +343,19 @@ def inline_confirm(update: Update, context: CallbackContext):
     chat_id = query.message.chat_id
     message_id = query.message.message_id
 
+    user_first_name = query.from_user.first_name or "You"
+
     db.save_user(user_id, user_timezone)
     schedule_reminder(
         user_id,
         message,
         remind_dt,
-        extra={'inline_chat_id': chat_id, 'inline_message_id': message_id}
+        extra={
+            'inline_chat_id': chat_id,
+            'inline_message_id': message_id,
+            'user_id': user_id,
+            'user_first_name': user_first_name,
+        }
     )
 
     time_label = format_remind_dt(remind_dt, user_timezone)
