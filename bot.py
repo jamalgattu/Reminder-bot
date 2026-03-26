@@ -128,7 +128,11 @@ def start(update: Update, context: CallbackContext):
         "  Clock:    /remind 14:30 Team meeting\n\n"
         "/list — Show all reminders\n"
         "/delete <id> — Delete a reminder\n\n"
-        "You can also use me inline: type @botname in any chat!"
+        "💬 In a group chat?\n"
+        "Use /remind directly in the group — when the time comes, "
+        "I'll send a new message in the group tagging you.\n\n"
+        "⚡ Inline mode (@botname in any chat) is also supported, "
+        "but reminders set that way are delivered to you privately."
     )
 
 
@@ -369,8 +373,7 @@ def inline_confirm(update: Update, context: CallbackContext):
     confirm_text = (
         f"✅ Reminder set!\n"
         f"📌 {message}\n"
-        f"🕐 {time_label}\n\n"
-        f"I'll send you a DM when it's time."
+        f"🕐 {time_label}"
     )
 
     # For inline messages, query.message is None — edit via inline_message_id
@@ -385,7 +388,7 @@ def inline_confirm(update: Update, context: CallbackContext):
         except Exception:
             pass
 
-    query.answer("Reminder set! I'll DM you when it's time.")
+    query.answer("✅ Reminder confirmed!")
 
 
 # ========== Register Handlers ==========
