@@ -4,3 +4,5 @@ builder = "nixpacks"
 [deploy]
 startCommand = "python bot.py"
 restartPolicyType = "always"
+healthcheckPath = "/health"
+healthcheckTimeout = 30

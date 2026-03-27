@@ -108,8 +108,9 @@ def schedule_reminder(chat_id, message, remind_dt, extra=None):
     ctx = {'chat_id': chat_id, 'message': message}
     if extra:
         ctx.update(extra)
-    job = job_queue.run_once(send_reminder, delay, context=ctx)
-    db.save_reminder(chat_id, message, remind_dt.isoformat(), job.id)
+    job_name = str(uuid.uuid4())
+    job = job_queue.run_once(send_reminder, delay, context=ctx, name=job_name)
+    db.save_reminder(chat_id, message, remind_dt.isoformat(), job_name)
     return job
 
 
@@ -231,9 +232,9 @@ def delete_reminder(update: Update, context: CallbackContext):
         reminder_id = int(context.args[0])
         job_id = db.delete_reminder(reminder_id, chat_id)
         if job_id:
-            existing = job_queue.get_job_by_name(job_id)
-            if existing:
-                existing.schedule_removal()
+            matching = job_queue.get_jobs_by_name(job_id)
+            if matching:
+                matching[0].schedule_removal()
             update.message.reply_text(f"✅ Reminder {reminder_id} deleted.")
         else:
             update.message.reply_text(f"❌ Reminder {reminder_id} not found.")
@@ -440,4 +441,5 @@ if __name__ == '__main__':
     # Clear any stale webhook or long-poll connections from previous runs
     bot.delete_webhook(drop_pending_updates=True)
     updater.start_polling(drop_pending_updates=True, timeout=20, read_latency=5)
-    app.run(host='0.0.0.0', port=5000, debug=False)
+    port = int(os.environ.get('PORT', 5000))
+    app.run(host='0.0.0.0', port=port, debug=False)

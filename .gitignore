@@ -1,0 +1,33 @@
+# Environment & secrets
+.env
+
+# Database
+reminders.db
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual envs
+venv/
+.venv/
+env/
+.env/
+
+# Replit
+.pythonlibs/
+.cache/
+.upm/
+.replit
+replit.nix
+
+# Logs
+*.log
