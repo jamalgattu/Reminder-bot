@@ -1,3 +1,29 @@
+# pkg_resources shim — APScheduler 3.6.3 requires it but some environments
+# (Railway, fresh Docker containers) don't ship setuptools by default.
+# This must run before any telegram/apscheduler imports.
+try:
+    import pkg_resources  # noqa: F401
+except ImportError:
+    import sys
+    import types
+    import importlib.metadata
+
+    _pkg = types.ModuleType("pkg_resources")
+
+    class _Dist:
+        def __init__(self, d):
+            self.version = d.metadata["Version"]
+
+    def _get_distribution(name):
+        try:
+            return _Dist(importlib.metadata.distribution(name))
+        except importlib.metadata.PackageNotFoundError:
+            raise _pkg.DistributionNotFound(name)
+
+    _pkg.get_distribution = _get_distribution
+    _pkg.DistributionNotFound = importlib.metadata.PackageNotFoundError
+    sys.modules["pkg_resources"] = _pkg
+
 from flask import Flask, request, jsonify
 from telegram import (
     Update, Bot,

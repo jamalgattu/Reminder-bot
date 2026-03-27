@@ -1,8 +1,6 @@
 setuptools
 python-telegram-bot==13.7
 APScheduler==3.6.3
-SQLAlchemy==2.0.0
-dateparser
 pytz
 python-dotenv
 flask
