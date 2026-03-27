@@ -438,8 +438,17 @@ dispatcher.add_error_handler(error_handler)
 # ========== Main ==========
 
 if __name__ == '__main__':
-    # Clear any stale webhook or long-poll connections from previous runs
+    import threading
+    port = int(os.environ.get('PORT', 5000))
+
+    # Start Flask first so Railway healthcheck responds immediately
+    flask_thread = threading.Thread(
+        target=lambda: app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
+    )
+    flask_thread.daemon = True
+    flask_thread.start()
+
+    # Then initialise the Telegram bot (slow API call happens here)
     bot.delete_webhook(drop_pending_updates=True)
     updater.start_polling(drop_pending_updates=True, timeout=20, read_latency=5)
-    port = int(os.environ.get('PORT', 5000))
-    app.run(host='0.0.0.0', port=port, debug=False)
+    updater.idle()
