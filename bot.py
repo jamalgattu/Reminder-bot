@@ -118,7 +118,7 @@ def schedule_reminder(chat_id, message, remind_dt, extra=None):
 
 def start(update: Update, context: CallbackContext):
     chat_id = update.effective_chat.id
-    db.save_user(chat_id, timezone=None)
+    db.register_user(chat_id)
     update.message.reply_text(
         "👋 Welcome to Reminder Bot!\n\n"
         "Commands:\n"
@@ -133,7 +133,8 @@ def start(update: Update, context: CallbackContext):
         "Use /remind directly in the group — when the time comes, "
         "I'll send a new message in the group tagging you.\n\n"
         "⚡ Inline mode (@botname in any chat) is also supported, "
-        "but reminders set that way are delivered to you privately."
+        "but reminders set that way are delivered to you here privately.\n"
+        "Make sure you've started this bot in DM before using inline mode!"
     )
 
 
@@ -356,6 +357,22 @@ def inline_confirm(update: Update, context: CallbackContext):
     remind_dt = datetime.fromisoformat(pending['remind_dt'])
     user_first_name = query.from_user.first_name or "You"
 
+    time_label = format_remind_dt(remind_dt, user_timezone)
+
+    # Verify we can reach the user via DM before scheduling.
+    # If the user hasn't started the bot, Telegram will reject the send.
+    try:
+        context.bot.send_message(
+            chat_id=user_id,
+            text=f"✅ Reminder set!\n📌 {message}\n🕐 {time_label}",
+        )
+    except TelegramError:
+        query.answer(
+            "⚠️ I can't send you a DM! Please open this bot in private chat and send /start first, then try again.",
+            show_alert=True,
+        )
+        return
+
     db.save_user(user_id, user_timezone)
 
     # Telegram does not provide the group chat_id for inline callbacks.
@@ -370,7 +387,6 @@ def inline_confirm(update: Update, context: CallbackContext):
         }
     )
 
-    time_label = format_remind_dt(remind_dt, user_timezone)
     confirm_text = (
         f"✅ Reminder set!\n"
         f"📌 {message}\n"

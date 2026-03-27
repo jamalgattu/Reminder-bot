@@ -31,7 +31,16 @@ def init_db():
     conn.commit()
     conn.close()
 
+def register_user(chat_id):
+    """Insert user if not already present. Never overwrites existing timezone."""
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute('INSERT OR IGNORE INTO users (chat_id) VALUES (?)', (chat_id,))
+    conn.commit()
+    conn.close()
+
 def save_user(chat_id, timezone):
+    """Upsert user with a specific timezone."""
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute('''
