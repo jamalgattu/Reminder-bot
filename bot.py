@@ -1,28 +1,49 @@
-# pkg_resources shim — APScheduler 3.6.3 requires it but some environments
-# (Railway, fresh Docker containers) don't ship setuptools by default.
-# This must run before any telegram/apscheduler imports.
+# pkg_resources compatibility shim for APScheduler 3.6.3.
+# APScheduler needs three things from pkg_resources:
+#   1. get_distribution      (apscheduler/__init__.py)
+#   2. DistributionNotFound  (apscheduler/__init__.py)
+#   3. iter_entry_points     (apscheduler/schedulers/base.py)
+#
+# Two failure modes on Railway / Docker:
+#   A. setuptools not installed at all  → ImportError on `import pkg_resources`
+#   B. setuptools >= 72 installed       → pkg_resources exists but iter_entry_points
+#      was removed; causes ImportError on the FROM-import inside APScheduler
+#
+# This block handles both by patching whatever is missing after the import attempt.
+import sys as _sys
+import importlib.metadata as _imeta
+import types as _types
+
 try:
-    import pkg_resources  # noqa: F401
+    import pkg_resources as _pkgr
 except ImportError:
-    import sys
-    import types
-    import importlib.metadata
+    _pkgr = _types.ModuleType("pkg_resources")
+    _sys.modules["pkg_resources"] = _pkgr
 
-    _pkg = types.ModuleType("pkg_resources")
+if not hasattr(_pkgr, "DistributionNotFound"):
+    _pkgr.DistributionNotFound = _imeta.PackageNotFoundError
 
+if not hasattr(_pkgr, "get_distribution"):
     class _Dist:
         def __init__(self, d):
             self.version = d.metadata["Version"]
-
-    def _get_distribution(name):
+    def _get_dist(name):
         try:
-            return _Dist(importlib.metadata.distribution(name))
-        except importlib.metadata.PackageNotFoundError:
-            raise _pkg.DistributionNotFound(name)
+            return _Dist(_imeta.distribution(name))
+        except _imeta.PackageNotFoundError:
+            raise _pkgr.DistributionNotFound(name)
+    _pkgr.get_distribution = _get_dist
 
-    _pkg.get_distribution = _get_distribution
-    _pkg.DistributionNotFound = importlib.metadata.PackageNotFoundError
-    sys.modules["pkg_resources"] = _pkg
+if not hasattr(_pkgr, "iter_entry_points"):
+    def _iter_eps(group, name=None):
+        try:
+            eps = _imeta.entry_points(group=group)
+            return iter([ep for ep in eps if name is None or ep.name == name])
+        except Exception:
+            return iter([])
+    _pkgr.iter_entry_points = _iter_eps
+
+del _sys, _imeta, _types, _pkgr
 
 from flask import Flask, request, jsonify
 from telegram import (
