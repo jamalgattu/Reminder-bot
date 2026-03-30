@@ -93,6 +93,23 @@ def format_remind_dt(remind_dt, tz_str):
     return local_dt.strftime("%-d %b %Y, %I:%M:%S %p") + f" ({tz_str})"
 
 
+def format_relative(remind_dt):
+    """Return a human-friendly relative string like 'in 10 minutes'."""
+    now = datetime.now(pytz.utc)
+    delta = remind_dt.astimezone(pytz.utc) - now
+    total_seconds = max(1, int(delta.total_seconds()))
+    hours, rem = divmod(total_seconds, 3600)
+    minutes, seconds = divmod(rem, 60)
+    parts = []
+    if hours:
+        parts.append(f"{hours} hour{'s' if hours != 1 else ''}")
+    if minutes:
+        parts.append(f"{minutes} minute{'s' if minutes != 1 else ''}")
+    if not parts:
+        parts.append(f"{seconds} second{'s' if seconds != 1 else ''}")
+    return "in " + " and ".join(parts)
+
+
 def parse_time_to_dt(time_str, user_timezone):
     """
     Parse a time string (duration or HH:MM) into a timezone-aware datetime.
@@ -218,10 +235,18 @@ def remind(update: Update, context: CallbackContext):
 
     schedule_reminder(chat_id, message, remind_dt, extra=extra)
     time_label = format_remind_dt(remind_dt, user_timezone)
+    relative = format_relative(remind_dt)
+    tz_tip = (
+        "\n\n💡 Tip: Set your timezone so times display correctly:\n"
+        "/set_timezone Asia/Kolkata"
+        if user_timezone == 'UTC' else ""
+    )
     update.message.reply_text(
         f"✅ Reminder set!\n"
         f"📌 {message}\n"
+        f"⏱ {relative}\n"
         f"🕐 {time_label}"
+        f"{tz_tip}"
     )
 
 
@@ -431,7 +456,12 @@ def inline_confirm(update: Update, context: CallbackContext):
 
     db.save_user(user_id, user_timezone)
     time_label = format_remind_dt(remind_dt, user_timezone)
-    confirm_text = f"✅ Reminder set!\n📌 {message}\n🕐 {time_label}"
+    relative = format_relative(remind_dt)
+    tz_tip = (
+        "\n\n💡 Set your timezone for correct local time:\n/set_timezone Asia/Kolkata"
+        if user_timezone == 'UTC' else ""
+    )
+    confirm_text = f"✅ Reminder set!\n📌 {message}\n⏱ {relative}\n🕐 {time_label}{tz_tip}"
 
     if query.message is not None:
         # Button on a regular bot message (not an inline result) — we have chat_id
