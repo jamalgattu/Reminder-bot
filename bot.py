@@ -79,8 +79,8 @@ logger = logging.getLogger(__name__)
 # Initialize database
 db.init_db()
 
-# In-memory store for pending inline reminders (rid -> reminder data)
-# Only lives until the user taps the button, so memory is fine
+# In-memory store for pending inline reminders (rid -> reminder data).
+# Cleared on restart — old inline buttons will show "expired".
 pending_inline = {}
 
 
@@ -96,6 +96,7 @@ def format_remind_dt(remind_dt, tz_str):
 def parse_time_to_dt(time_str, user_timezone):
     """
     Parse a time string (duration or HH:MM) into a timezone-aware datetime.
+    Always called fresh at button-press time so the delay is accurate.
     Returns remind_dt or None.
     """
     tz = pytz.timezone(user_timezone)
@@ -144,12 +145,15 @@ def schedule_reminder(chat_id, message, remind_dt, extra=None):
     """Schedule a reminder job and save it to the DB."""
     now = datetime.now(pytz.utc)
     delay = (remind_dt.astimezone(pytz.utc) - now).total_seconds()
+    if delay < 0:
+        delay = 0
     ctx = {'chat_id': chat_id, 'message': message}
     if extra:
         ctx.update(extra)
     job_name = str(uuid.uuid4())
     job = job_queue.run_once(send_reminder, delay, context=ctx, name=job_name)
     db.save_reminder(chat_id, message, remind_dt.isoformat(), job_name)
+    logger.info(f"Reminder scheduled: chat_id={chat_id} delay={delay:.1f}s msg='{message}'")
     return job
 
 
@@ -222,33 +226,49 @@ def remind(update: Update, context: CallbackContext):
 
 
 def send_reminder(context: CallbackContext):
-    """Fire a reminder — sends a new message tagging the user in the chat, or DMs the user."""
+    """Fire a reminder."""
     chat_id = context.job.context['chat_id']
     message = context.job.context['message']
+    reminder_text = f"⏰ Reminder: {message}"
+
     inline_chat_id = context.job.context.get('inline_chat_id')
     user_id = context.job.context.get('user_id')
     user_first_name = context.job.context.get('user_first_name', 'You')
+    inline_message_id_str = context.job.context.get('inline_message_id_str')
 
-    reminder_text = f"⏰ Reminder: {message}"
-
-    try:
-        if inline_chat_id and user_id:
-            # Send a new message in the group, tagging the user
-            mention = f'<a href="tg://user?id={user_id}">{user_first_name}</a>'
+    if inline_chat_id and user_id:
+        # /remind in a group — send a tagged message in the group chat
+        mention = f'<a href="tg://user?id={user_id}">{user_first_name}</a>'
+        try:
             bot.send_message(
                 chat_id=inline_chat_id,
                 text=f"{mention} {reminder_text}",
                 parse_mode='HTML'
             )
-        else:
+            return
+        except TelegramError as e:
+            logger.error(f"Failed to send group reminder, falling back to DM: {e}")
+
+    if inline_message_id_str:
+        # Inline bot result — edit the original inline message, then DM the user
+        try:
+            bot.edit_message_text(
+                inline_message_id=inline_message_id_str,
+                text=reminder_text
+            )
+        except TelegramError as e:
+            logger.warning(f"Could not edit inline message: {e}")
+        try:
             bot.send_message(chat_id=chat_id, text=reminder_text)
+        except TelegramError as e:
+            logger.error(f"Failed to DM reminder: {e}")
+        return
+
+    # Plain /remind in DM
+    try:
+        bot.send_message(chat_id=chat_id, text=reminder_text)
     except TelegramError as e:
         logger.error(f"Failed to send reminder: {e}")
-        try:
-            if inline_chat_id:
-                bot.send_message(chat_id=chat_id, text=reminder_text)
-        except TelegramError:
-            pass
 
 
 def list_reminders(update: Update, context: CallbackContext):
@@ -314,14 +334,12 @@ def inline_query(update: Update, context: CallbackContext):
         if remind_dt and message:
             time_label = format_remind_dt(remind_dt, user_timezone)
 
-            # Store pending reminder data keyed by a short ID
             rid = str(uuid.uuid4())[:12]
             pending_inline[rid] = {
                 'time_str': time_str,
                 'message': message,
                 'user_id': user_id,
                 'user_timezone': user_timezone,
-                'remind_dt': remind_dt.isoformat(),
             }
 
             preview_text = (
@@ -372,9 +390,13 @@ def inline_query(update: Update, context: CallbackContext):
 def inline_confirm(update: Update, context: CallbackContext):
     """
     Called when the user taps the 'Set Reminder' button on an inline message.
-    For inline messages, query.message is None — we use inline_message_id to edit.
-    The reminder is delivered as a DM to the user since Telegram does not expose
-    the group chat_id in inline callbacks.
+
+    Key facts about inline callback queries (Telegram Bot API):
+      - query.message is None  — inline results don't expose the chat message object
+      - query.inline_message_id is set — use this to edit the sent message
+
+    The remind_dt is re-calculated fresh at button-press time (not the stale value
+    stored during inline_query), so the countdown starts from when the user confirms.
     """
     query = update.callback_query
     data = query.data
@@ -387,64 +409,62 @@ def inline_confirm(update: Update, context: CallbackContext):
     pending = pending_inline.pop(rid, None)
 
     if not pending:
-        query.answer("⚠️ This reminder has already been set or expired.")
+        query.answer(
+            "⚠️ Reminder expired — please create a new one.",
+            show_alert=True
+        )
         return
 
     user_id = pending['user_id']
     message = pending['message']
+    time_str = pending['time_str']
     user_timezone = pending['user_timezone']
-    remind_dt = datetime.fromisoformat(pending['remind_dt'])
     user_first_name = query.from_user.first_name or "You"
 
-    time_label = format_remind_dt(remind_dt, user_timezone)
-
-    # Verify we can reach the user via DM before scheduling.
-    # If the user hasn't started the bot, Telegram will reject the send.
-    try:
-        context.bot.send_message(
-            chat_id=user_id,
-            text=f"✅ Reminder set!\n📌 {message}\n🕐 {time_label}",
-        )
-    except TelegramError:
-        query.answer(
-            "⚠️ I can't send you a DM! Please open this bot in private chat and send /start first, then try again.",
-            show_alert=True,
-        )
+    # Re-calculate remind_dt NOW (at button-press time), not at inline-query time.
+    # This ensures "1h" means 1 hour from when the user taps Confirm, not from
+    # when they started typing.
+    remind_dt = parse_time_to_dt(time_str, user_timezone)
+    if not remind_dt:
+        query.answer("❌ Could not schedule reminder.", show_alert=True)
         return
 
     db.save_user(user_id, user_timezone)
+    time_label = format_remind_dt(remind_dt, user_timezone)
+    confirm_text = f"✅ Reminder set!\n📌 {message}\n🕐 {time_label}"
 
-    # Telegram does not provide the group chat_id for inline callbacks.
-    # We schedule the reminder as a DM to the user (chat_id = user_id).
-    schedule_reminder(
-        user_id,
-        message,
-        remind_dt,
-        extra={
-            'user_id': user_id,
-            'user_first_name': user_first_name,
-        }
-    )
-
-    confirm_text = (
-        f"✅ Reminder set!\n"
-        f"📌 {message}\n"
-        f"🕐 {time_label}"
-    )
-
-    # For inline messages, query.message is None — edit via inline_message_id
-    if query.message:
+    if query.message is not None:
+        # Button on a regular bot message (not an inline result) — we have chat_id
+        chat_id = query.message.chat_id
+        schedule_reminder(
+            user_id, message, remind_dt,
+            extra={
+                'inline_chat_id': chat_id,
+                'user_id': user_id,
+                'user_first_name': user_first_name,
+            }
+        )
         query.edit_message_text(confirm_text)
     else:
+        # Inline result button — query.message is None, use inline_message_id
+        inline_message_id_str = query.inline_message_id
+        schedule_reminder(
+            user_id, message, remind_dt,
+            extra={
+                'inline_message_id_str': inline_message_id_str,
+                'user_id': user_id,
+                'user_first_name': user_first_name,
+            }
+        )
         try:
             context.bot.edit_message_text(
-                inline_message_id=query.inline_message_id,
+                inline_message_id=inline_message_id_str,
                 text=confirm_text,
             )
-        except Exception:
-            pass
+        except TelegramError as e:
+            logger.warning(f"Could not edit inline confirmation message: {e}")
 
-    query.answer("✅ Reminder confirmed!")
+    query.answer("✅ Reminder set!")
 
 
 # ========== Register Handlers ==========
@@ -471,7 +491,6 @@ def index():
 
 @app.route('/health', methods=['GET'])
 def health():
-    from flask import jsonify
     return jsonify({"status": "healthy"}), 200
 
 # ========== Error Handler ==========
@@ -503,7 +522,7 @@ if __name__ == '__main__':
     flask_thread.daemon = True
     flask_thread.start()
 
-    # Then initialise the Telegram bot (slow API call happens here)
+    # Then initialise the Telegram bot
     bot.delete_webhook(drop_pending_updates=True)
     updater.start_polling(drop_pending_updates=True, timeout=20, read_latency=5)
     updater.idle()
